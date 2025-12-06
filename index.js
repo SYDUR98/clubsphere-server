@@ -22,7 +22,8 @@ app.use(express.json());
 app.use(cors());
 
 app.get('/', (req, res) => {
-  res.send('Hello World!')
+  res.send('club sphere sarver working!')
+  
 })
 
 
@@ -30,12 +31,31 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+    const db = client.db("club-sphere-db");
+    const userCollection = db.collection("users");
+
+     app.post("/users", async (req, res) => {
+      const user = req.body;
+      user.role = "member";
+      user.createAt = new Date();
+      const exists = await userCollection.findOne({ email: user.email });
+      if (exists) return res.send({ message: "user exists" });
+      const result = await userCollection.insertOne(user);
+      res.send(result);
+    });
+
+
+
+
+
+
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
-    await client.close();
+    // await client.close();
   }
 }
 run().catch(console.dir);

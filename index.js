@@ -1,7 +1,7 @@
-const express = require('express')
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const express = require("express");
+const { MongoClient, ServerApiVersion } = require("mongodb");
 const cors = require("cors");
-const app = express()
+const app = express();
 require("dotenv").config();
 const port = process.env.PORT || 3000;
 
@@ -14,18 +14,16 @@ const client = new MongoClient(uri, {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
 });
 
 // Middleware
 app.use(express.json());
 app.use(cors());
 
-app.get('/', (req, res) => {
-  res.send('club sphere sarver working!')
-  
-})
-
+app.get("/", (req, res) => {
+  res.send("club sphere sarver working!");
+});
 
 async function run() {
   try {
@@ -33,8 +31,12 @@ async function run() {
     await client.connect();
     const db = client.db("club-sphere-db");
     const userCollection = db.collection("users");
+    const clubsCollection = db.collection("clubs");
 
-     app.post("/users", async (req, res) => {
+    //=============================================================================
+    //                  user related APIs
+    //=============================================================================
+    app.post("/users", async (req, res) => {
       const user = req.body;
       user.role = "member";
       user.createAt = new Date();
@@ -44,15 +46,67 @@ async function run() {
       res.send(result);
     });
 
+    //================================================================================
+    //               club related apis
+    //================================================================================
 
+    app.post("/clubs", async (req, res) => {
+      try {
+        const {
+          clubName,
+          description,
+          category,
+          location,
+          bannerImage,
+          membershipFee,
+          managerEmail,
+          status,
+          createdAt,
+        } = req.body;
 
+        // validation
+        if (
+          !clubName ||
+          !description ||
+          !category ||
+          !location ||
+          !bannerImage ||
+          membershipFee == null ||
+          !managerEmail
+        ) {
+          return res.status(400).json({ message: "All fields are required" });
+        }
 
+        const newClub = {
+          clubName,
+          description,
+          category,
+          location,
+          bannerImage,
+          membershipFee,
+          managerEmail,
+          status: status || "pending",
+          createdAt: createdAt || new Date(),
+        };
 
+        const result = await clubsCollection.insertOne(newClub);
 
+        res.status(201).json({
+          message: "Club created successfully",
+          clubId: result.insertedId,
+          club: newClub,
+        });
+      } catch (error) {
+        console.error("Error creating club:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
@@ -60,8 +114,6 @@ async function run() {
 }
 run().catch(console.dir);
 
-
-
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`)
-})
+  console.log(`Example app listening on port ${port}`);
+});

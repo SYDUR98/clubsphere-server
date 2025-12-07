@@ -1,5 +1,5 @@
 const express = require("express");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
@@ -47,9 +47,9 @@ async function run() {
     });
 
     //================================================================================
-    //               club related apis
+    //              Manager apis
     //================================================================================
-
+    //club related apis
     app.post("/clubs", async (req, res) => {
       try {
         const {
@@ -102,6 +102,68 @@ async function run() {
       }
     });
 
+    // Get My Clubs
+    app.get("/clubs/manager/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await clubsCollection
+        .find({ managerEmail: email })
+        .toArray();
+      res.send(result);
+    });
+
+    // Edit Club
+    app.patch("/clubs/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const data = { ...req.body };
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid club ID" });
+        }
+
+        // Remove _id if it exists, keep createdAt as it is
+        delete data._id;
+
+        // Convert membershipFee to number if it exists
+        if (data.membershipFee) {
+          data.membershipFee = Number(data.membershipFee);
+        }
+
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              ...data,
+              updatedAt: new Date(), // Only update updatedAt
+            },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "Club not found" });
+        }
+
+        res.status(200).json({ message: "Club updated successfully" });
+      } catch (err) {
+        console.error("PATCH ERROR:", err);
+        res.status(500).json({ message: "Update failed", error: err.message });
+      }
+    });
+    // delete pais
+    app.delete("/clubs/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const result = await clubsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Delete failed" });
+      }
+    });
+
+    //******************************************************************************** */
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(

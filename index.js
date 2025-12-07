@@ -32,6 +32,7 @@ async function run() {
     const db = client.db("club-sphere-db");
     const userCollection = db.collection("users");
     const clubsCollection = db.collection("clubs");
+    const eventsCollection = db.collection("events");
 
     //=============================================================================
     //                  user related APIs
@@ -162,6 +163,121 @@ async function run() {
         res.status(500).send({ message: "Delete failed" });
       }
     });
+
+    // event apis
+
+    // Create Event
+    app.post("/events", async (req, res) => {
+      try {
+        const {
+          title,
+          description,
+          eventDate,
+          location,
+          isPaid,
+          eventFee,
+          clubId,
+          maxAttendees,
+        } = req.body;
+
+        if (!title || !description || !eventDate || !location || !clubId) {
+          return res.status(400).json({ message: "Missing required fields" });
+        }
+
+        const data = {
+          title,
+          description,
+          eventDate: new Date(eventDate),
+          location,
+          isPaid: !!isPaid,
+          maxAttendees: maxAttendees ? Number(maxAttendees) : null,
+          createdAt: new Date(),
+          clubId: new ObjectId(clubId),
+        };
+
+        if (isPaid) {
+          if (!eventFee || isNaN(eventFee)) {
+            return res
+              .status(400)
+              .json({ message: "Event fee is required for paid events" });
+          }
+          data.eventFee = Number(eventFee);
+        }
+
+        const result = await eventsCollection.insertOne(data);
+        res
+          .status(201)
+          .json({ message: "Event created", eventId: result.insertedId });
+      } catch (err) {
+        console.error(err);
+        res
+          .status(500)
+          .json({ message: "Failed to create event", error: err.message });
+      }
+    });
+
+    // Get Events
+    app.get("/events", async (req, res) => {
+      try {
+        const clubId = req.params.clubId;
+        const events = await eventsCollection.find().toArray();
+        res.json(events);
+      } catch (err) {
+        res.status(500).json({ message: "Failed to fetch events" });
+      }
+    });
+    // delete events
+    app.delete("/events/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const query = { _id: new ObjectId(id) };
+        const result = await eventsCollection.deleteOne(query);
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Delete failed" });
+      }
+    });
+
+    // Update Event
+    app.patch("/events/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const data = { ...req.body };
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid event ID" });
+        }
+
+        // Remove _id if accidentally sent
+        delete data._id;
+
+        // Type conversion
+        if (data.eventDate) data.eventDate = new Date(data.eventDate);
+        if (data.isPaid !== undefined) data.isPaid = !!data.isPaid;
+        if (data.eventFee) data.eventFee = Number(data.eventFee);
+        if (data.maxAttendees) data.maxAttendees = Number(data.maxAttendees);
+
+        const result = await eventsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { ...data, updatedAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "Event not found" });
+        }
+
+        res.status(200).json({ message: "Event updated successfully" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Update failed", error: err.message });
+      }
+    });
+
+
+
+
+
+
 
     //******************************************************************************** */
     // Send a ping to confirm a successful connection

@@ -37,6 +37,7 @@ async function run() {
     //=============================================================================
     //                  user related APIs
     //=============================================================================
+    // add users
     app.post("/users", async (req, res) => {
       const user = req.body;
       user.role = "member";
@@ -80,6 +81,43 @@ async function run() {
         });
       } catch (err) {
         res.status(500).send({ message: "Stats loading failed" });
+      }
+    });
+
+    // admin get all users
+    app.get("/users", async (req, res) => {
+      try {
+        const users = await userCollection.find().toArray();
+        res.send(users);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to load users" });
+      }
+    });
+
+    //amin change role
+    app.patch("/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const { role } = req.body;
+
+      try {
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: { role } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Role update failed" });
+      }
+    });
+
+    //  delete user -> amdin
+    app.delete("/users/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await userCollection.deleteOne({ email });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Delete failed" });
       }
     });
 

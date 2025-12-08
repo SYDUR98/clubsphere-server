@@ -48,6 +48,42 @@ async function run() {
     });
 
     //================================================================================
+    //                    Admin apis
+    //================================================================================
+    // Admin Stats API
+    app.get("/admin/stats", async (req, res) => {
+      try {
+        const totalUsers = await userCollection.countDocuments();
+        const totalClubs = await clubsCollection.countDocuments();
+        const pendingClubs = await clubsCollection.countDocuments({
+          status: "pending",
+        });
+        const approvedClubs = await clubsCollection.countDocuments({
+          status: "approved",
+        });
+        const rejectedClubs = await clubsCollection.countDocuments({
+          status: "rejected",
+        });
+        const totalEvents = await eventsCollection.countDocuments();
+
+        //  payments collection later
+        const totalPayments = 0;
+
+        res.send({
+          totalUsers,
+          totalClubs,
+          pendingClubs,
+          approvedClubs,
+          rejectedClubs,
+          totalEvents,
+          totalPayments,
+        });
+      } catch (err) {
+        res.status(500).send({ message: "Stats loading failed" });
+      }
+    });
+
+    //================================================================================
     //              Manager apis
     //================================================================================
     //club related apis
@@ -219,7 +255,7 @@ async function run() {
     // Get Events
     app.get("/events", async (req, res) => {
       try {
-        const clubId = req.params.clubId;
+        // const clubId = req.params.clubId;
         const events = await eventsCollection.find().toArray();
         res.json(events);
       } catch (err) {
@@ -272,12 +308,6 @@ async function run() {
         res.status(500).json({ message: "Update failed", error: err.message });
       }
     });
-
-
-
-
-
-
 
     //******************************************************************************** */
     // Send a ping to confirm a successful connection

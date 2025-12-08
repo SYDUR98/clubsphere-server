@@ -121,6 +121,42 @@ async function run() {
       }
     });
 
+    // Get all clubs (Admin)
+    app.get("/admin/clubs", async (req, res) => {
+      try {
+        const result = await clubsCollection.find().toArray();
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch clubs" });
+      }
+    });
+
+    // Approve or Reject club -> admni
+    app.patch("/admin/clubs/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status } = req.body; // 'approved' or 'rejected'
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid ID" });
+        }
+
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: status,
+              updatedAt: new Date(),
+            },
+          }
+        );
+
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to update status" });
+      }
+    });
+
     //================================================================================
     //              Manager apis
     //================================================================================

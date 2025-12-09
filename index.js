@@ -37,6 +37,7 @@ async function run() {
     const eventsCollection = db.collection("events");
     const paymentCollection = db.collection("payments");
     const membershipsCollection = db.collection("memberships");
+    const eventRegistrationsCollection = db.collection("eventRegistrations");
 
     //=============================================================================
     //                  user related APIs
@@ -58,8 +59,6 @@ async function run() {
 
     app.get("/clubs", async (req, res) => {
       try {
-        
-
         let query = { status: "approved" };
 
         const clubs = await clubsCollection.find(query).toArray();
@@ -127,8 +126,8 @@ async function run() {
     });
 
     //-------------------------------------------------------------------------------
-    
-    // Payment success 
+
+    // Payment success
     app.post("/payments/confirm", async (req, res) => {
       const { sessionId } = req.body;
 
@@ -215,8 +214,19 @@ async function run() {
         });
         const totalEvents = await eventsCollection.countDocuments();
 
-        //  payments collection later
-        const totalPayments = 0;
+        const revenueResult = await paymentCollection
+          .aggregate([
+            {
+              $group: {
+                _id: null,
+                totalRevenue: { $sum: "$amount" },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalPayments =
+          revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
 
         res.send({
           totalUsers,
@@ -534,6 +544,206 @@ async function run() {
     //================================================================================
     //              Member apis
     //================================================================================
+   
+    // event apis
+    app.get("/member/events", async (req, res) => {
+      try {
+        const userEmail = req.query.email;
+
+        if (!userEmail) {
+          return res.status(400).send({ message: "User email is required." });
+        }
+
+        const memberships = await membershipsCollection
+          .find({
+            userEmail,
+            status: "active",
+          })
+          .toArray(); 
+
+        const clubIds = memberships.map((m) => m.clubId);
+
+       
+        console.log("Active Member Email:", userEmail);
+        console.log("Active Club IDs:", clubIds);
+
+        if (clubIds.length === 0) {
+          return res.send([]);
+        } 
+
+        const events = await eventsCollection
+          .find({
+            clubId: { $in: clubIds },
+            eventDate: { $gte: new Date() },
+          })
+          .toArray();
+
+        console.log("Fetched Future Events Count:", events.length); 
+
+        const finalEvents = await Promise.all(
+          events.map(async (event) => {
+            const club = await clubsCollection.findOne({ _id: event.clubId });
+
+            const registration = await eventRegistrationsCollection.findOne({
+              eventId: event._id,
+              userEmail: userEmail,
+            });
+
+            return {
+              ...event,
+              clubName: club?.clubName || "Unknown Club",
+              isRegistered: !!registration,
+            };
+          })
+        );
+
+        res.send(finalEvents);
+      } catch (err) {
+        console.error("Member events error:", err);
+        res.status(500).send({ message: "Failed to load events" });
+      }
+    });
+
+    
+    app.post("/events/register/:id", async (req, res) => {
+      try {
+        const eventId = req.params.id;
+        const { userEmail } = req.body;
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(eventId),
+        });
+        if (!event) {
+          return res.status(404).send({ message: "Event not found." });
+        }
+
+        // 1. Check for duplicate registration
+        const existingRegistration = await eventRegistrationsCollection.findOne(
+          {
+            eventId: new ObjectId(eventId),
+            userEmail: userEmail,
+          }
+        );
+
+        if (existingRegistration) {
+          return res
+            .status(400)
+            .send({ message: "You are already registered for this event." });
+        }
+
+        // 2. Free Event Logic
+        if (!event.isPaid || event.eventFee === 0) {
+          await eventRegistrationsCollection.insertOne({
+            eventId: new ObjectId(eventId),
+            clubId: event.clubId,
+            userEmail: userEmail,
+            status: "registered",
+            registeredAt: new Date(),
+          });
+          return res.send({
+            message: "Successfully registered for the free event.",
+          });
+        }
+
+        // 3. Paid Event Logic (Stripe Session Creation)
+        const feeInCents = Math.round(event.eventFee * 100);
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: `Event Registration: ${event.title}`,
+                },
+                unit_amount: feeInCents,
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/event/payment-success?session_id={CHECKOUT_SESSION_ID}`, // Success URL for event payment
+          cancel_url: `${process.env.SITE_DOMAIN}/events/${eventId}?status=cancel`,
+          metadata: {
+            userEmail,
+            eventId: event._id.toString(),
+            clubId: event.clubId.toString(),
+            type: "event_registration",
+          },
+        });
+
+        res.send({ url: session.url });
+      } catch (err) {
+        console.error("Event registration error:", err);
+        res
+          .status(500)
+          .send({ message: "Internal server error during registration." });
+      }
+    });
+
+    // Confirms Event Registration Payment
+    app.post("/payments/confirm/event", async (req, res) => {
+      const { sessionId } = req.body;
+
+      if (!sessionId)
+        return res.status(400).send({ message: "Missing sessionId" });
+
+      try {
+        const session = await stripe.checkout.sessions.retrieve(sessionId); // Validate payment status
+
+        if (
+          session.payment_status !== "paid" ||
+          session.metadata.type !== "event_registration"
+        ) {
+          return res
+            .status(400)
+            .send({ message: "Payment not completed or wrong type" });
+        }
+
+        const { userEmail, eventId, clubId } = session.metadata;
+        const amount = session.amount_total / 100; // Prevent duplicate payment entry
+
+        const existingPayment = await paymentCollection.findOne({
+          transactionId: session.id,
+        });
+        if (existingPayment) {
+          return res.send({ message: "Event payment already confirmed" });
+        } // 1. Save payment record
+
+        await paymentCollection.insertOne({
+          userEmail,
+          clubId,
+          eventId,
+          transactionId: session.id,
+          amount,
+          type: "event",
+          status: "success",
+          createdAt: new Date(),
+        }); // 2. Create Event Registration (converting string IDs from metadata to ObjectId)
+
+        const registration = await eventRegistrationsCollection.insertOne({
+          userEmail,
+          clubId: new ObjectId(clubId),
+          eventId: new ObjectId(eventId),
+          status: "registered",
+          registeredAt: new Date(),
+          paymentId: session.id,
+        });
+
+        res.send({
+          message: "Event payment confirmed & registration complete",
+          registration,
+        });
+      } catch (err) {
+        console.error("Event Payment confirm error:", err);
+        res.status(500).send({
+          message: "Event payment confirmation failed",
+          error: err.message,
+        });
+      }
+    });
 
     //******************************************************************************** */
     // Send a ping to confirm a successful connection

@@ -4,6 +4,8 @@ const cors = require("cors");
 const app = express();
 require("dotenv").config();
 const port = process.env.PORT || 3000;
+const Stripe = require("stripe");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // mongodb
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.chduhq7.mongodb.net/?appName=Cluster0`;
@@ -33,6 +35,8 @@ async function run() {
     const userCollection = db.collection("users");
     const clubsCollection = db.collection("clubs");
     const eventsCollection = db.collection("events");
+    const paymentCollection = db.collection("payments");
+    const membershipsCollection = db.collection("memberships");
 
     //=============================================================================
     //                  user related APIs
@@ -48,6 +52,150 @@ async function run() {
       res.send(result);
     });
 
+    //================================================================================
+    //              Display apis
+    //================================================================================
+
+    app.get("/clubs", async (req, res) => {
+      try {
+        
+
+        let query = { status: "approved" };
+
+        const clubs = await clubsCollection.find(query).toArray();
+
+        res.send(clubs);
+      } catch (err) {
+        console.error("Fetch clubs error:", err);
+        res.status(500).send({ message: "Failed to fetch clubs" });
+      }
+    });
+
+    //------------------------------------------------------------------------------
+    // Join club (Free / Paid)
+    app.post("/clubs/join/:clubId", async (req, res) => {
+      const { clubId } = req.params;
+      const { userEmail } = req.body;
+
+      if (!userEmail)
+        return res.status(400).send({ message: "User email required" });
+      if (!ObjectId.isValid(clubId))
+        return res.status(400).send({ message: "Invalid club ID" });
+
+      const club = await clubsCollection.findOne({ _id: new ObjectId(clubId) });
+      if (!club) return res.status(404).send({ message: "Club not found" });
+
+      const existing = await membershipsCollection.findOne({
+        userEmail,
+        clubId: club._id,
+      });
+      if (existing) return res.status(400).send({ message: "Already joined" });
+
+      const fee = Number(club.membershipFee) || 0;
+
+      // Free club
+      if (fee === 0) {
+        await membershipsCollection.insertOne({
+          userEmail,
+          clubId: club._id,
+          status: "active",
+          joinedAt: new Date(),
+        });
+        return res.send({ message: "Joined free club" });
+      }
+
+      // Paid club -> create Stripe checkout
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ["card"],
+        mode: "payment",
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: { name: club.clubName },
+              unit_amount: fee * 100,
+            },
+            quantity: 1,
+          },
+        ],
+        metadata: { userEmail, clubId: club._id.toString() },
+        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
+      });
+
+      res.send({ url: session.url, sessionId: session.id });
+    });
+
+    //-------------------------------------------------------------------------------
+    
+    // Payment success 
+    app.post("/payments/confirm", async (req, res) => {
+      const { sessionId } = req.body;
+
+      if (!sessionId)
+        return res.status(400).send({ message: "Missing sessionId" });
+
+      try {
+        // Stripe থেকে session verify
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+        if (session.payment_status !== "paid") {
+          return res.status(400).send({ message: "Payment not completed" });
+        }
+
+        const { userEmail, clubId } = session.metadata;
+        const amount = session.amount_total / 100; // cents to dollars
+
+        // Check if already paid
+        const existingPayment = await paymentCollection.findOne({
+          transactionId: session.id,
+        });
+        if (existingPayment) {
+          return res.send({ message: "Payment already confirmed" });
+        }
+
+        // Save payment
+        const payment = await paymentCollection.insertOne({
+          userEmail,
+          clubId,
+          transactionId: session.id,
+          amount,
+          status: "success",
+          createdAt: new Date(),
+        });
+
+        // Create membership
+        const membership = await membershipsCollection.insertOne({
+          userEmail,
+          clubId: new ObjectId(clubId),
+          status: "active",
+          joinedAt: new Date(),
+        });
+
+        res.send({
+          message: "Payment confirmed & club joined",
+          payment,
+          membership,
+        });
+      } catch (err) {
+        console.error("Payment confirm error:", err);
+        res
+          .status(500)
+          .send({ message: "Payment confirmation failed", error: err.message });
+      }
+    });
+
+    // Check membership
+    app.get("/clubs/is-member", async (req, res) => {
+      const { userEmail, clubId } = req.query;
+      if (!userEmail || !clubId) return res.send({ isMember: false });
+
+      const member = await membershipsCollection.findOne({
+        userEmail,
+        clubId: new ObjectId(clubId),
+      });
+      res.send({ isMember: !!member });
+    });
     //================================================================================
     //                    Admin apis
     //================================================================================
@@ -382,6 +530,10 @@ async function run() {
         res.status(500).json({ message: "Update failed", error: err.message });
       }
     });
+
+    //================================================================================
+    //              Member apis
+    //================================================================================
 
     //******************************************************************************** */
     // Send a ping to confirm a successful connection

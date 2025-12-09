@@ -544,7 +544,7 @@ async function run() {
     //================================================================================
     //              Member apis
     //================================================================================
-   
+
     // event apis
     app.get("/member/events", async (req, res) => {
       try {
@@ -559,17 +559,16 @@ async function run() {
             userEmail,
             status: "active",
           })
-          .toArray(); 
+          .toArray();
 
         const clubIds = memberships.map((m) => m.clubId);
 
-       
         console.log("Active Member Email:", userEmail);
         console.log("Active Club IDs:", clubIds);
 
         if (clubIds.length === 0) {
           return res.send([]);
-        } 
+        }
 
         const events = await eventsCollection
           .find({
@@ -578,7 +577,7 @@ async function run() {
           })
           .toArray();
 
-        console.log("Fetched Future Events Count:", events.length); 
+        console.log("Fetched Future Events Count:", events.length);
 
         const finalEvents = await Promise.all(
           events.map(async (event) => {
@@ -604,7 +603,6 @@ async function run() {
       }
     });
 
-    
     app.post("/events/register/:id", async (req, res) => {
       try {
         const eventId = req.params.id;
@@ -742,6 +740,54 @@ async function run() {
           message: "Event payment confirmation failed",
           error: err.message,
         });
+      }
+    });
+
+    // member status
+    
+    app.get("/member/stats", async (req, res) => {
+      try {
+        const userEmail = req.query.email;
+
+        if (!userEmail) {
+          return res.status(400).send({ message: "User email is required." });
+        } 
+
+        const totalClubsJoined = await membershipsCollection.countDocuments({
+          userEmail,
+          status: "active",
+        }); 
+
+        const totalEventsRegistered =
+          await eventRegistrationsCollection.countDocuments({
+            userEmail,
+            status: "registered",
+          }); 
+
+        const revenueResult = await paymentCollection
+          .aggregate([
+           
+            { $match: { userEmail, status: "success" } },
+            {
+              $group: {
+                _id: null,
+                totalSpent: { $sum: "$amount" }, 
+              },
+            },
+          ])
+          .toArray();
+
+        const totalSpent =
+          revenueResult.length > 0 ? revenueResult[0].totalSpent : 0;
+
+        res.send({
+          totalClubsJoined,
+          totalEventsRegistered,
+          totalSpent: totalSpent.toFixed(2), 
+        });
+      } catch (err) {
+        console.error("Member stats error:", err);
+        res.status(500).send({ message: "Failed to load member stats" });
       }
     });
 

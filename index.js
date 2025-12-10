@@ -3,10 +3,37 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
+
 const port = process.env.PORT || 3000;
+
+const admin = require("firebase-admin");
+
+
+
+// const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+// const serviceAccount = JSON.parse(decoded);
+
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+// });
+
 const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// Verify Firebase Token
+const verifyFBToken = async (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token) return res.status(401).send({ message: "unauthorized access" });
+
+  try {
+    const idToken = token.split(" ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.decoded_email = decoded.email;
+    next();
+  } catch (err) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+};
 // mongodb
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.chduhq7.mongodb.net/?appName=Cluster0`;
 
@@ -125,6 +152,164 @@ async function run() {
       res.send({ url: session.url, sessionId: session.id });
     });
 
+    // protected
+    // Get all events for a specific club (PROTECTED)
+    app.get("/clubs/:clubId/events", async (req, res) => {
+      const { clubId } = req.params;
+      const userEmail = req.decoded_email; // Firebase token থেকে email
+
+      if (!ObjectId.isValid(clubId)) {
+        return res.status(400).send({ message: "Invalid club ID" });
+      }
+
+      try {
+        // Check membership first
+        const member = await membershipsCollection.findOne({
+          clubId: new ObjectId(clubId),
+          userEmail,
+          status: "active",
+        });
+
+        if (!member) {
+          return res.status(403).send({
+            message:
+              "Forbidden: You must be an active member to view club events.",
+          });
+        }
+
+        // Fetch events for the club
+        const events = await eventsCollection
+          .find({ clubId: new ObjectId(clubId) })
+          .sort({ eventDate: 1 })
+          .toArray();
+
+        // For each event, compute registration count and whether current user registered
+        const result = await Promise.all(
+          events.map(async (ev) => {
+            const regCount = await eventRegistrationsCollection.countDocuments({
+              eventId: ev._id,
+              status: { $ne: "cancelled" },
+            });
+
+            const userReg = await eventRegistrationsCollection.findOne({
+              eventId: ev._id,
+              userEmail,
+            });
+
+            return {
+              ...ev,
+              registrationCount: regCount,
+              isRegistered: !!userReg,
+            };
+          })
+        );
+
+        res.send(result);
+      } catch (err) {
+        console.error("Protected events error:", err);
+        res.status(500).send({ message: "Failed to fetch club events" });
+      }
+    });
+
+    // Register for an Event (PROTECTED)
+    app.post("/events/register/:id", async (req, res) => {
+      try {
+        const eventId = req.params.id;
+        const userEmail = req.decoded_email; // Firebase token থেকে email
+
+        if (!userEmail) {
+          return res
+            .status(401)
+            .send({ message: "Unauthorized: User email missing from token." });
+        }
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(eventId),
+        });
+        if (!event) {
+          return res.status(404).send({ message: "Event not found." });
+        }
+
+        // 1. Check membership for event club
+        const member = await membershipsCollection.findOne({
+          userEmail,
+          clubId: event.clubId,
+          status: "active",
+        });
+
+        if (!member) {
+          return res.status(403).send({
+            message:
+              "Forbidden: You must be an active member of the club to register for this event.",
+          });
+        }
+
+        // 2. Check for duplicate registration
+        const existingRegistration = await eventRegistrationsCollection.findOne(
+          {
+            eventId: new ObjectId(eventId),
+            userEmail: userEmail,
+            status: { $ne: "cancelled" },
+          }
+        );
+
+        if (existingRegistration) {
+          return res
+            .status(400)
+            .send({ message: "You are already registered for this event." });
+        }
+
+        // 3. Free Event Logic
+        if (!event.isPaid || event.eventFee === 0) {
+          await eventRegistrationsCollection.insertOne({
+            eventId: new ObjectId(eventId),
+            clubId: event.clubId,
+            userEmail: userEmail,
+            status: "registered",
+            registeredAt: new Date(),
+          });
+          return res.send({
+            message: "Successfully registered for the free event.",
+          });
+        }
+
+        // 4. Paid Event Logic (Stripe Session Creation)
+        const feeInCents = Math.round(event.eventFee * 100);
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: {
+                  name: `Event Registration: ${event.title}`,
+                },
+                unit_amount: feeInCents,
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          success_url: `${process.env.SITE_DOMAIN}/dashboard/event/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${process.env.SITE_DOMAIN}/events/${eventId}?status=cancel`,
+          metadata: {
+            userEmail,
+            eventId: event._id.toString(),
+            clubId: event.clubId.toString(),
+            type: "event_registration",
+          },
+        });
+
+        res.send({ url: session.url });
+      } catch (err) {
+        console.error("Event registration error:", err);
+        res
+          .status(500)
+          .send({ message: "Internal server error during registration." });
+      }
+    });
+
     //-------------------------------------------------------------------------------
 
     // Payment success
@@ -195,6 +380,83 @@ async function run() {
       });
       res.send({ isMember: !!member });
     });
+
+    //*****************details apis******************** */
+    // GET single club details
+    app.get("/clubs/:id/details", async (req, res) => {
+      const id = req.params.id;
+      const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
+      if (!club) return res.status(404).send({ message: "Club not found" });
+
+      const upcomingCount = await eventsCollection.countDocuments({
+        clubId: new ObjectId(id),
+        eventDate: { $gte: new Date() },
+      });
+
+      res.send({ ...club, upcomingEventsCount: upcomingCount });
+    });
+
+    // Replace or add this handler in your run() where collections are defined
+    app.get("/clubs/:clubId/events", async (req, res) => {
+      const { clubId } = req.params;
+      const userEmail = req.user?.email; // set by verifyJWT
+
+      if (!ObjectId.isValid(clubId)) {
+        return res.status(400).send({ message: "Invalid club ID" });
+      }
+
+      if (!userEmail) {
+        return res.status(401).send({ message: "Unauthorized" });
+      }
+
+      try {
+        // Check membership first
+        const member = await membershipsCollection.findOne({
+          clubId: new ObjectId(clubId),
+          userEmail,
+          status: "active",
+        });
+
+        if (!member) {
+          return res
+            .status(403)
+            .send({ message: "Forbidden: you are not a member of this club" });
+        }
+
+        // Fetch events for the club (optionally upcoming only)
+        const events = await eventsCollection
+          .find({ clubId: new ObjectId(clubId) })
+          .sort({ eventDate: 1 })
+          .toArray();
+
+        // For each event, compute registration count and whether current user registered
+        const result = await Promise.all(
+          events.map(async (ev) => {
+            const regCount = await eventRegistrationsCollection.countDocuments({
+              eventId: ev._id,
+              status: { $ne: "cancelled" }, // count only active regs
+            });
+
+            const userReg = await eventRegistrationsCollection.findOne({
+              eventId: ev._id,
+              userEmail,
+            });
+
+            return {
+              ...ev,
+              registrationCount: regCount,
+              isRegistered: !!userReg,
+            };
+          })
+        );
+
+        res.send(result);
+      } catch (err) {
+        console.error("Protected events error:", err);
+        res.status(500).send({ message: "Failed to fetch club events" });
+      }
+    });
+
     //================================================================================
     //                    Admin apis
     //================================================================================
@@ -603,84 +865,6 @@ async function run() {
       }
     });
 
-    app.post("/events/register/:id", async (req, res) => {
-      try {
-        const eventId = req.params.id;
-        const { userEmail } = req.body;
-
-        const event = await eventsCollection.findOne({
-          _id: new ObjectId(eventId),
-        });
-        if (!event) {
-          return res.status(404).send({ message: "Event not found." });
-        }
-
-        // 1. Check for duplicate registration
-        const existingRegistration = await eventRegistrationsCollection.findOne(
-          {
-            eventId: new ObjectId(eventId),
-            userEmail: userEmail,
-          }
-        );
-
-        if (existingRegistration) {
-          return res
-            .status(400)
-            .send({ message: "You are already registered for this event." });
-        }
-
-        // 2. Free Event Logic
-        if (!event.isPaid || event.eventFee === 0) {
-          await eventRegistrationsCollection.insertOne({
-            eventId: new ObjectId(eventId),
-            clubId: event.clubId,
-            userEmail: userEmail,
-            status: "registered",
-            registeredAt: new Date(),
-          });
-          return res.send({
-            message: "Successfully registered for the free event.",
-          });
-        }
-
-        // 3. Paid Event Logic (Stripe Session Creation)
-        const feeInCents = Math.round(event.eventFee * 100);
-
-        const session = await stripe.checkout.sessions.create({
-          payment_method_types: ["card"],
-          line_items: [
-            {
-              price_data: {
-                currency: "usd",
-                product_data: {
-                  name: `Event Registration: ${event.title}`,
-                },
-                unit_amount: feeInCents,
-              },
-              quantity: 1,
-            },
-          ],
-          mode: "payment",
-
-          success_url: `${process.env.SITE_DOMAIN}/dashboard/event/payment-success?session_id={CHECKOUT_SESSION_ID}`, // Success URL for event payment
-          cancel_url: `${process.env.SITE_DOMAIN}/events/${eventId}?status=cancel`,
-          metadata: {
-            userEmail,
-            eventId: event._id.toString(),
-            clubId: event.clubId.toString(),
-            type: "event_registration",
-          },
-        });
-
-        res.send({ url: session.url });
-      } catch (err) {
-        console.error("Event registration error:", err);
-        res
-          .status(500)
-          .send({ message: "Internal server error during registration." });
-      }
-    });
-
     // Confirms Event Registration Payment
     app.post("/payments/confirm/event", async (req, res) => {
       const { sessionId } = req.body;
@@ -744,34 +928,33 @@ async function run() {
     });
 
     // member status
-    
+
     app.get("/member/stats", async (req, res) => {
       try {
         const userEmail = req.query.email;
 
         if (!userEmail) {
           return res.status(400).send({ message: "User email is required." });
-        } 
+        }
 
         const totalClubsJoined = await membershipsCollection.countDocuments({
           userEmail,
           status: "active",
-        }); 
+        });
 
         const totalEventsRegistered =
           await eventRegistrationsCollection.countDocuments({
             userEmail,
             status: "registered",
-          }); 
+          });
 
         const revenueResult = await paymentCollection
           .aggregate([
-           
             { $match: { userEmail, status: "success" } },
             {
               $group: {
                 _id: null,
-                totalSpent: { $sum: "$amount" }, 
+                totalSpent: { $sum: "$amount" },
               },
             },
           ])
@@ -783,11 +966,50 @@ async function run() {
         res.send({
           totalClubsJoined,
           totalEventsRegistered,
-          totalSpent: totalSpent.toFixed(2), 
+          totalSpent: totalSpent.toFixed(2),
         });
       } catch (err) {
         console.error("Member stats error:", err);
         res.status(500).send({ message: "Failed to load member stats" });
+      }
+    });
+
+    // GET /member/clubs: join member
+    app.get("/member/clubs", async (req, res) => {
+      try {
+        const userEmail = req.query.email;
+        if (!userEmail)
+          return res.status(400).send({ message: "User email is required." });
+
+        const memberships = await membershipsCollection
+          .find({ userEmail, status: "active" })
+          .toArray();
+        if (memberships.length === 0) return res.send([]);
+
+        const joinedClubs = await Promise.all(
+          memberships.map(async (m) => {
+            const club = await clubsCollection.findOne({ _id: m.clubId });
+            const upcomingCount = await eventsCollection.countDocuments({
+              clubId: m.clubId,
+              eventDate: { $gte: new Date() },
+            });
+
+            return {
+              membershipId: m._id,
+              status: m.status,
+              joinedAt: m.joinedAt,
+              clubId: club?._id,
+              clubName: club?.clubName || "Unknown Club",
+              location: club?.location || "N/A",
+              upcomingEventsCount: upcomingCount,
+            };
+          })
+        );
+
+        res.send(joinedClubs);
+      } catch (err) {
+        console.error("Fetch clubs error:", err);
+        res.status(500).send({ message: "Failed to fetch joined clubs" });
       }
     });
 

@@ -8,7 +8,7 @@ const port = process.env.PORT || 3000;
 
 const admin = require("firebase-admin");
 
-
+// var serviceAccount = require("./club-sphere-app-firebase-adminsdk.json");
 
 // const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
 // const serviceAccount = JSON.parse(decoded);
@@ -66,6 +66,16 @@ async function run() {
     const membershipsCollection = db.collection("memberships");
     const eventRegistrationsCollection = db.collection("eventRegistrations");
 
+    // Verify Admin
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded_email;
+      const user = await userCollection.findOne({ email });
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "forbidden access" });
+      }
+      next();
+    };
+
     //=============================================================================
     //                  user related APIs
     //=============================================================================
@@ -98,63 +108,10 @@ async function run() {
     });
 
     //------------------------------------------------------------------------------
-    // Join club (Free / Paid)
-    app.post("/clubs/join/:clubId", async (req, res) => {
-      const { clubId } = req.params;
-      const { userEmail } = req.body;
-
-      if (!userEmail)
-        return res.status(400).send({ message: "User email required" });
-      if (!ObjectId.isValid(clubId))
-        return res.status(400).send({ message: "Invalid club ID" });
-
-      const club = await clubsCollection.findOne({ _id: new ObjectId(clubId) });
-      if (!club) return res.status(404).send({ message: "Club not found" });
-
-      const existing = await membershipsCollection.findOne({
-        userEmail,
-        clubId: club._id,
-      });
-      if (existing) return res.status(400).send({ message: "Already joined" });
-
-      const fee = Number(club.membershipFee) || 0;
-
-      // Free club
-      if (fee === 0) {
-        await membershipsCollection.insertOne({
-          userEmail,
-          clubId: club._id,
-          status: "active",
-          joinedAt: new Date(),
-        });
-        return res.send({ message: "Joined free club" });
-      }
-
-      // Paid club -> create Stripe checkout
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ["card"],
-        mode: "payment",
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              product_data: { name: club.clubName },
-              unit_amount: fee * 100,
-            },
-            quantity: 1,
-          },
-        ],
-        metadata: { userEmail, clubId: club._id.toString() },
-        success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cancelled`,
-      });
-
-      res.send({ url: session.url, sessionId: session.id });
-    });
 
     // protected
     // Get all events for a specific club (PROTECTED)
-    app.get("/clubs/:clubId/events", async (req, res) => {
+    app.get("/clubs/:clubId/events", verifyFBToken, async (req, res) => {
       const { clubId } = req.params;
       const userEmail = req.decoded_email; // Firebase token থেকে email
 
@@ -212,7 +169,7 @@ async function run() {
     });
 
     // Register for an Event (PROTECTED)
-    app.post("/events/register/:id", async (req, res) => {
+    app.post("/events/register/:id", verifyFBToken, async (req, res) => {
       try {
         const eventId = req.params.id;
         const userEmail = req.decoded_email; // Firebase token থেকে email
@@ -461,7 +418,8 @@ async function run() {
     //                    Admin apis
     //================================================================================
     // Admin Stats API
-    app.get("/admin/stats", async (req, res) => {
+    // Admin Stats API
+    app.get("/admin/stats", verifyFBToken, verifyAdmin, async (req, res) => {
       try {
         const totalUsers = await userCollection.countDocuments();
         const totalClubs = await clubsCollection.countDocuments();
@@ -478,12 +436,7 @@ async function run() {
 
         const revenueResult = await paymentCollection
           .aggregate([
-            {
-              $group: {
-                _id: null,
-                totalRevenue: { $sum: "$amount" },
-              },
-            },
+            { $group: { _id: null, totalRevenue: { $sum: "$amount" } } },
           ])
           .toArray();
 
@@ -500,6 +453,7 @@ async function run() {
           totalPayments,
         });
       } catch (err) {
+        console.error("Admin stats error:", err);
         res.status(500).send({ message: "Stats loading failed" });
       }
     });
@@ -580,6 +534,85 @@ async function run() {
     //================================================================================
     //              Manager apis
     //================================================================================
+    // Manager overview: number of clubs manager manages,
+    app.get("/manager/overview", verifyFBToken, async (req, res) => {
+      try {
+        const managerEmail = req.decoded_email;
+        if (!managerEmail)
+          return res.status(401).send({ message: "Unauthorized" });
+
+        // 1) clubs managed by this manager
+        const clubs = await clubsCollection
+          .find({ managerEmail })
+          .project({ _id: 1 })
+          .toArray();
+        const clubObjectIds = clubs.map((c) => c._id);
+        const clubStringIds = clubs.map((c) => c._id.toString());
+
+        const numberOfClubs = clubs.length;
+
+        if (numberOfClubs === 0) {
+          return res.send({
+            numberOfClubs: 0,
+            totalMembers: 0,
+            totalEvents: 0,
+            totalPaymentsReceived: 0,
+          });
+        }
+
+        const totalMembers = await membershipsCollection.countDocuments({
+          clubId: { $in: clubObjectIds },
+          status: "active",
+        });
+
+        const totalEvents = await eventsCollection.countDocuments({
+          clubId: { $in: clubObjectIds },
+        });
+
+        const paymentsAgg = await paymentCollection
+          .aggregate([
+            {
+              $match: {
+                $and: [
+                  { status: "success" },
+                  {
+                    $or: [
+                      { clubId: { $in: clubStringIds } }, // stored as string
+                      { clubId: { $in: clubObjectIds } }, // stored as ObjectId
+                    ],
+                  },
+                ],
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: "$amount" },
+                count: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+
+        const totalPaymentsReceived =
+          paymentsAgg.length > 0 ? paymentsAgg[0].total : 0;
+
+        return res.send({
+          numberOfClubs,
+          totalMembers,
+          totalEvents,
+          totalPaymentsReceived,
+        });
+      } catch (err) {
+        console.error("Manager overview error:", err);
+        res.status(500).send({
+          message: "Failed to load manager overview",
+          error: err.message,
+        });
+      }
+    });
+
+    //-------------------------------------------------------------------------------------
     //club related apis
     app.post("/clubs", async (req, res) => {
       try {
@@ -929,9 +962,9 @@ async function run() {
 
     // member status
 
-    app.get("/member/stats", async (req, res) => {
+    app.get("/member/stats", verifyFBToken, async (req, res) => {
       try {
-        const userEmail = req.query.email;
+        const userEmail = req.decoded_email;
 
         if (!userEmail) {
           return res.status(400).send({ message: "User email is required." });

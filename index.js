@@ -130,20 +130,7 @@ async function run() {
     //              Display apis
     //================================================================================
 
-    // app.get("/clubs", async (req, res) => {
-    //   try {
-    //     let query = { status: "approved" };
-
-    //     const clubs = await clubsCollection.find(query).toArray();
-
-    //     res.send(clubs);
-    //   } catch (err) {
-    //     console.error("Fetch clubs error:", err);
-    //     res.status(500).send({ message: "Failed to fetch clubs" });
-    //   }
-    // });
-
-    app.get("/clubs", verifyFBToken, async (req, res) => {
+    app.get("/clubs/display", async (req, res) => {
       try {
         const {
           search = "",
@@ -174,7 +161,6 @@ async function run() {
       }
     });
 
-    // Join a club (Paid or Free) with Stripe
     app.post("/clubs/join/:clubId", verifyFBToken, async (req, res) => {
       try {
         const { clubId } = req.params;
@@ -261,15 +247,14 @@ async function run() {
 
     //------------------------------------------------------------------------------
 
-    // protected
-    // Get all events for a specific club (PROTECTED)
+    // Get all events for a specific club PROTECTED
     app.get(
       "/clubs/:clubId/events",
       verifyFBToken,
 
       async (req, res) => {
         const { clubId } = req.params;
-        const userEmail = req.decoded_email; // Firebase token থেকে email
+        const userEmail = req.decoded_email;
 
         if (!ObjectId.isValid(clubId)) {
           return res.status(400).send({ message: "Invalid club ID" });
@@ -330,7 +315,7 @@ async function run() {
     app.post("/events/register/:id", verifyFBToken, async (req, res) => {
       try {
         const eventId = req.params.id;
-        const userEmail = req.decoded_email; // Firebase token থেকে email
+        const userEmail = req.decoded_email; 
 
         if (!userEmail) {
           return res
@@ -435,7 +420,6 @@ async function run() {
         return res.status(400).send({ message: "Missing sessionId" });
 
       try {
-        // Stripe থেকে session verify
         const session = await stripe.checkout.sessions.retrieve(sessionId);
 
         if (session.payment_status !== "paid") {
@@ -443,7 +427,7 @@ async function run() {
         }
 
         const { userEmail, clubId } = session.metadata;
-        const amount = session.amount_total / 100; // cents to dollars
+        const amount = session.amount_total / 100;
 
         // Check if already paid
         const existingPayment = await paymentCollection.findOne({
@@ -737,7 +721,7 @@ async function run() {
           if (!managerEmail)
             return res.status(401).send({ message: "Unauthorized" });
 
-          // 1) clubs managed by this manager
+          //  clubs managed by this manager
           const clubs = await clubsCollection
             .find({ managerEmail })
             .project({ _id: 1 })
@@ -810,32 +794,44 @@ async function run() {
     );
 
     //-------------------------------------------------------------------------------------
-    //club related apis
+
+    //nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+
+    // CreateClub -> Page
+
     app.post("/clubs", verifyFBToken, verifyManager, async (req, res) => {
       try {
-        const {
+        let {
           clubName,
           description,
           category,
           location,
           bannerImage,
           membershipFee,
-          managerEmail,
-          status,
-          createdAt,
         } = req.body;
 
-        // validation
-        if (
-          !clubName ||
-          !description ||
-          !category ||
-          !location ||
-          !bannerImage ||
-          membershipFee == null ||
-          !managerEmail
-        ) {
-          return res.status(400).json({ message: "All fields are required" });
+        // Normalize / trim inputs
+        clubName = (clubName || "").toString().trim();
+        description = (description || "").toString().trim();
+        category = (category || "").toString().trim();
+        location = (location || "").toString().trim();
+        bannerImage = (bannerImage || "").toString().trim();
+
+        // Basic validation
+        if (!clubName || !description || !category || !location) {
+          return res.status(400).json({ message: "Missing required fields" });
+        }
+
+        // membershipFee safe conversion (default 0)
+        const fee =
+          membershipFee === undefined ||
+          membershipFee === null ||
+          membershipFee === ""
+            ? 0
+            : Number(membershipFee);
+
+        if (isNaN(fee) || fee < 0) {
+          return res.status(400).json({ message: "Invalid membership fee" });
         }
 
         const newClub = {
@@ -843,25 +839,300 @@ async function run() {
           description,
           category,
           location,
-          bannerImage,
-          membershipFee,
-          managerEmail,
-          status: status || "pending",
-          createdAt: createdAt || new Date(),
+          bannerImage: bannerImage || null,
+          membershipFee: fee,
+          managerEmail: req.decoded_email, // set by verifyFBToken
+          status: "pending",
+          createdAt: new Date(),
+          updatedAt: new Date(),
         };
 
         const result = await clubsCollection.insertOne(newClub);
 
         res.status(201).json({
-          message: "Club created successfully",
+          message: "Club created (Pending Admin Approval)",
           clubId: result.insertedId,
-          club: newClub,
         });
-      } catch (error) {
-        console.error("Error creating club:", error);
-        res.status(500).json({ message: "Internal server error" });
+      } catch (err) {
+        console.error("Create club error:", err);
+        res.status(500).json({ message: "Failed to create club" });
       }
     });
+
+    // GET /clubs/my - Fetch manager's own clubs
+    app.get("/clubs/my", verifyFBToken, verifyManager, async (req, res) => {
+      try {
+        const managerEmail = req.decoded_email;
+
+        if (!managerEmail) {
+          return res
+            .status(401)
+            .json({ message: "Unauthorized: manager email missing" });
+        }
+
+        // Fetch all clubs created by this manager
+        const clubs = await clubsCollection
+          .find({ managerEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.status(200).json(clubs);
+      } catch (err) {
+        console.error("Fetch manager clubs error:", err);
+        res.status(500).json({ message: "Failed to fetch clubs" });
+      }
+    });
+
+    app.patch("/clubs/:id", verifyFBToken, verifyManager, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const managerEmail = req.decoded_email;
+
+        // Validate ID
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid club ID" });
+        }
+
+        const clubObjectId = new ObjectId(id);
+
+        // Build filter: only allow the manager who owns the club
+        const filter = { _id: clubObjectId, managerEmail };
+
+        // Prepare update document
+        const updateFields = { ...req.body };
+
+        // Prevent critical fields from being updated
+        delete updateFields._id;
+        delete updateFields.createdAt;
+        delete updateFields.status;
+        delete updateFields.managerEmail; // cannot change owner email
+
+        // Attach updatedAt timestamp
+        updateFields.updatedAt = new Date();
+
+        const updateDoc = { $set: updateFields };
+
+        const result = await clubsCollection.updateOne(filter, updateDoc);
+
+        if (result.matchedCount === 0) {
+          return res
+            .status(404)
+            .json({ message: "Club not found or access denied" });
+        }
+
+        res.json({ message: "Club updated successfully" });
+      } catch (err) {
+        console.error("Update club error:", err);
+        res.status(500).json({ message: "Failed to update club" });
+      }
+    });
+
+    // CreateEvent page
+    app.post("/events", verifyFBToken, verifyManager, async (req, res) => {
+      try {
+        const {
+          title,
+          description,
+          eventDate,
+          location,
+          isPaid,
+          eventFee,
+          clubId,
+          maxAttendees,
+        } = req.body;
+
+        const managerEmail = req.decoded_email;
+
+        // Validate required fields
+        if (
+          !title ||
+          !description ||
+          !eventDate ||
+          !location ||
+          !clubId ||
+          !ObjectId.isValid(clubId)
+        ) {
+          return res
+            .status(400)
+            .json({ message: "Missing or invalid required fields" });
+        }
+
+        const clubObjectId = new ObjectId(clubId);
+
+        // Ensure manager owns the club
+        const club = await clubsCollection.findOne({
+          _id: clubObjectId,
+          managerEmail, // only manager of this club can create event
+        });
+
+        if (!club) {
+          return res.status(403).json({
+            message: "Forbidden: Club not approved or not managed by you.",
+          });
+        }
+
+        // Prepare new event
+        const newEvent = {
+          title: title.toString().trim(),
+          description: description.toString().trim(),
+          eventDate: new Date(eventDate),
+          location: location.toString().trim(),
+          isPaid: !!isPaid,
+          eventFee: isPaid ? Number(eventFee) : 0,
+          maxAttendees: maxAttendees ? Number(maxAttendees) : null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          clubId: clubObjectId,
+          clubName: club.clubName,
+          managerEmail,
+        };
+
+        const result = await eventsCollection.insertOne(newEvent);
+
+        res.status(201).json({
+          message: "Event created",
+          eventId: result.insertedId,
+        });
+      } catch (err) {
+        console.error("Create event error:", err);
+        res.status(500).json({ message: "Failed to create event" });
+      }
+    });
+
+    app.patch("/events/:id", verifyFBToken, verifyManager, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const managerEmail = req.decoded_email;
+
+        // Validate ID
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid event ID" });
+        }
+
+        const eventObjectId = new ObjectId(id);
+
+        // Filter: ensure manager owns the event
+        const filter = { _id: eventObjectId, managerEmail };
+
+        // Build update object
+        const updateData = { ...req.body };
+
+        // Prevent updating critical fields
+        delete updateData._id;
+        delete updateData.createdAt;
+        delete updateData.clubId;
+        delete updateData.clubName;
+        delete updateData.managerEmail;
+
+        // Handle specific fields
+        if (updateData.eventDate)
+          updateData.eventDate = new Date(updateData.eventDate);
+        if (updateData.isPaid !== undefined) {
+          updateData.isPaid = !!updateData.isPaid;
+          updateData.eventFee = updateData.isPaid
+            ? Number(updateData.eventFee || 0)
+            : 0;
+        }
+        if (updateData.maxAttendees !== undefined) {
+          updateData.maxAttendees = updateData.maxAttendees
+            ? Number(updateData.maxAttendees)
+            : null;
+        }
+
+        // Always update updatedAt
+        updateData.updatedAt = new Date();
+
+        const result = await eventsCollection.updateOne(filter, {
+          $set: updateData,
+        });
+
+        if (result.matchedCount === 0) {
+          return res
+            .status(404)
+            .json({ message: "Event not found or access denied" });
+        }
+
+        res.json({ message: "Event updated successfully" });
+      } catch (err) {
+        console.error("Update event error:", err);
+        res.status(500).json({ message: "Failed to update event" });
+      }
+    });
+
+    //manager apis
+    app.get(
+      "/manager/all/events",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const managerEmail = req.decoded_email;
+
+          // Find all events created by manager's clubs
+          const events = await eventsCollection
+            .find({ managerEmail })
+            .sort({ eventDate: 1 })
+            .toArray();
+
+          res.status(200).json(events);
+        } catch (err) {
+          console.error("Manager events error:", err);
+          res.status(500).json({ message: "Failed to fetch events" });
+        }
+      }
+    );
+    // show event
+    app.delete(
+      "/manager/all/events/:id",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const result = await eventsCollection.deleteOne({
+            _id: new ObjectId(id),
+          });
+          if (result.deletedCount === 1) {
+            res.status(200).json({ message: "Event deleted successfully" });
+          } else {
+            res.status(404).json({ message: "Event not found" });
+          }
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ message: "Failed to delete event" });
+        }
+      }
+    );
+
+    app.patch(
+      "/manager/all/events/:id",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const updateData = req.body;
+
+          const result = await eventsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: updateData }
+          );
+
+          if (result.modifiedCount === 1) {
+            res.status(200).json({ message: "Event updated successfully" });
+          } else {
+            res
+              .status(404)
+              .json({ message: "Event not found or no changes made" });
+          }
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ message: "Failed to update event" });
+        }
+      }
+    );
+
+    //nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 
     // Get My Clubs
     app.get(
@@ -877,44 +1148,6 @@ async function run() {
       }
     );
 
-    // Edit Club
-    app.patch("/clubs/:id", verifyFBToken, verifyManager, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const data = { ...req.body };
-
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).json({ message: "Invalid club ID" });
-        }
-
-        // Remove _id if it exists, keep createdAt as it is
-        delete data._id;
-
-        // Convert membershipFee to number if it exists
-        if (data.membershipFee) {
-          data.membershipFee = Number(data.membershipFee);
-        }
-
-        const result = await clubsCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $set: {
-              ...data,
-              updatedAt: new Date(), // Only update updatedAt
-            },
-          }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ message: "Club not found" });
-        }
-
-        res.status(200).json({ message: "Club updated successfully" });
-      } catch (err) {
-        console.error("PATCH ERROR:", err);
-        res.status(500).json({ message: "Update failed", error: err.message });
-      }
-    });
     // delete pais
     app.delete("/clubs/:id", verifyFBToken, verifyManager, async (req, res) => {
       try {
@@ -929,147 +1162,8 @@ async function run() {
       }
     });
 
-    // event apis
-
-    // Create Event
-    // assume: const verifyFBToken = require("./middlewares/verifyFBToken");
-    // and eventsCollection, ObjectId are in scope
-
-    // app.post("/events", verifyFBToken, async (req, res) => {
-    //   try {
-    //     const {
-    //       title,
-    //       description,
-    //       eventDate,
-    //       location,
-    //       isPaid,
-    //       eventFee,
-    //       clubId,
-    //       maxAttendees,
-    //     } = req.body;
-
-    //     // server-side manager email from verified token
-    //     const managerEmail = req.user?.email;
-    //     if (!managerEmail) {
-    //       return res
-    //         .status(401)
-    //         .json({ message: "Unauthorized: manager email missing" });
-    //     }
-
-    //     if (!title || !description || !eventDate || !location || !clubId) {
-    //       return res.status(400).json({ message: "Missing required fields" });
-    //     }
-
-    //     const data = {
-    //       title,
-    //       description,
-    //       eventDate: new Date(eventDate),
-    //       location,
-    //       isPaid: !!isPaid,
-    //       maxAttendees: maxAttendees ? Number(maxAttendees) : null,
-    //       createdAt: new Date(),
-    //       clubId: new ObjectId(clubId),
-    //       managerEmail, // <-- ensure saved from token
-    //     };
-
-    //     if (isPaid) {
-    //       if (eventFee == null || eventFee === "" || isNaN(eventFee)) {
-    //         return res
-    //           .status(400)
-    //           .json({ message: "Event fee is required for paid events" });
-    //       }
-    //       data.eventFee = Number(eventFee);
-    //     }
-
-    //     const result = await eventsCollection.insertOne(data);
-    //     res
-    //       .status(201)
-    //       .json({ message: "Event created", eventId: result.insertedId });
-    //   } catch (err) {
-    //     console.error("Create event error:", err);
-    //     res
-    //       .status(500)
-    //       .json({ message: "Failed to create event", error: err.message });
-    //   }
-    // });
-    app.post("/events", verifyFBToken, async (req, res) => {
-      try {
-        const {
-          title,
-          description,
-          eventDate,
-          location,
-          isPaid,
-          eventFee,
-          clubId,
-          maxAttendees,
-        } = req.body;
-
-        const managerEmail = req.decoded_email;
-        if (!managerEmail) {
-          return res
-            .status(401)
-            .json({ message: "Unauthorized: manager email missing" });
-        }
-
-        if (!title || !description || !eventDate || !location || !clubId) {
-          return res.status(400).json({ message: "Missing required fields" });
-        }
-
-        // Validate club exists
-        const club = await clubsCollection.findOne({
-          _id: new ObjectId(clubId),
-        });
-        if (!club) {
-          return res.status(404).json({ message: "Club not found" });
-        }
-
-        const newEvent = {
-          title,
-          description,
-          eventDate: new Date(eventDate),
-          location,
-          isPaid: !!isPaid,
-          maxAttendees: maxAttendees ? Number(maxAttendees) : null,
-          createdAt: new Date(),
-          clubId: club._id,
-          clubName: club.clubName, // attach automatically from DB
-          managerEmail,
-        };
-
-        if (isPaid) {
-          if (eventFee == null || eventFee === "" || isNaN(eventFee)) {
-            return res
-              .status(400)
-              .json({ message: "Event fee is required for paid events" });
-          }
-          newEvent.eventFee = Number(eventFee);
-        }
-
-        const result = await eventsCollection.insertOne(newEvent);
-        res
-          .status(201)
-          .json({ message: "Event created", eventId: result.insertedId });
-      } catch (err) {
-        console.error("Create event error:", err);
-        res
-          .status(500)
-          .json({ message: "Failed to create event", error: err.message });
-      }
-    });
-
-    // Get Events
-    // app.get("/events", async (req, res) => {
-    //   try {
-    //     // const clubId = req.params.clubId;
-    //     const events = await eventsCollection.find().toArray();
-    //     res.json(events);
-    //   } catch (err) {
-    //     res.status(500).json({ message: "Failed to fetch events" });
-    //   }
-    // });
-    // GET /events/my
-    app.get("/events/my", verifyFBToken, async (req, res) => {
+    // GET /events/my  (Events created by the manager)
+    app.get("/events/my", verifyFBToken, verifyManager, async (req, res) => {
       try {
         const managerEmail = req.decoded_email;
         if (!managerEmail)
@@ -1092,16 +1186,16 @@ async function run() {
     });
 
     // delete events
-    app.delete("/events/:id", async (req, res) => {
-      try {
-        const id = req.params.id;
-        const query = { _id: new ObjectId(id) };
-        const result = await eventsCollection.deleteOne(query);
-        res.send(result);
-      } catch (err) {
-        res.status(500).send({ message: "Delete failed" });
-      }
-    });
+    // app.delete("/events/:id", async (req, res) => {
+    //   try {
+    //     const id = req.params.id;
+    //     const query = { _id: new ObjectId(id) };
+    //     const result = await eventsCollection.deleteOne(query);
+    //     res.send(result);
+    //   } catch (err) {
+    //     res.status(500).send({ message: "Delete failed" });
+    //   }
+    // });
 
     // Update Event
     app.patch("/events/:id", async (req, res) => {
@@ -1137,6 +1231,109 @@ async function run() {
         res.status(500).json({ message: "Update failed", error: err.message });
       }
     });
+    //************************************12 apis************************************ */
+    // GET /manager/members
+    app.get(
+      "/manager/members",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const managerEmail = req.decoded_email;
+          if (!managerEmail)
+            return res.status(401).send({ message: "Unauthorized" });
+
+          // 1) clubs managed by this manager
+          const clubs = await clubsCollection
+            .find({ managerEmail })
+            .project({ _id: 1, clubName: 1 })
+            .toArray();
+          if (!clubs || clubs.length === 0) return res.send([]);
+
+          const clubIds = clubs.map((c) => c._id);
+
+          // 2) memberships for those clubs
+          const memberships = await membershipsCollection
+            .find({ clubId: { $in: clubIds } })
+            .toArray();
+          if (!memberships || memberships.length === 0) return res.send([]);
+
+          // 3) enrich with user info and clubName
+          const result = await Promise.all(
+            memberships.map(async (m) => {
+              const user = await userCollection.findOne({ email: m.userEmail });
+              const club =
+                clubs.find((c) => c._id.toString() === m.clubId?.toString()) ||
+                (await clubsCollection.findOne({ _id: m.clubId }));
+
+              return {
+                membershipId: m._id,
+                clubId: m.clubId,
+                clubName: club?.clubName || "Unknown Club",
+                memberEmail: m.userEmail,
+                memberName: user?.name || user?.displayName || null,
+                status: m.status,
+                joinedAt: m.joinedAt,
+              };
+            })
+          );
+
+          res.send(result);
+        } catch (err) {
+          console.error("Manager members error:", err);
+          res
+            .status(500)
+            .send({ message: "Failed to load members", error: err.message });
+        }
+      }
+    );
+
+    // PATCH /memberships/:id
+    app.patch(
+      "/memberships/:id",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const { status } = req.body;
+
+          if (!ObjectId.isValid(id))
+            return res.status(400).send({ message: "Invalid membership id" });
+          if (!status)
+            return res.status(400).send({ message: "Missing status" });
+
+          const membership = await membershipsCollection.findOne({
+            _id: new ObjectId(id),
+          });
+          if (!membership)
+            return res.status(404).send({ message: "Membership not found" });
+
+          // verify manager owns the club
+          const club = await clubsCollection.findOne({
+            _id: membership.clubId,
+          });
+          if (!club) return res.status(404).send({ message: "Club not found" });
+          if (club.managerEmail !== req.decoded_email) {
+            return res
+              .status(403)
+              .send({ message: "Forbidden: you do not manage this club" });
+          }
+
+          const result = await membershipsCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status, updatedAt: new Date() } }
+          );
+
+          res.send({ message: "Membership updated", result });
+        } catch (err) {
+          console.error("Update membership error:", err);
+          res
+            .status(500)
+            .send({ message: "Update failed", error: err.message });
+        }
+      }
+    );
 
     //================================================================================
     //              Member apis
@@ -1242,7 +1439,7 @@ async function run() {
             type: "event",
             status: "success",
             createdAt: new Date(),
-          }); // 2. Create Event Registration (converting string IDs from metadata to ObjectId)
+          }); 
 
           const registration = await eventRegistrationsCollection.insertOne({
             userEmail,
@@ -1314,46 +1511,97 @@ async function run() {
       }
     });
 
-    // GET /member/clubs: join member
     app.get("/member/clubs", verifyFBToken, async (req, res) => {
       try {
-        const userEmail = req.query.email;
+        const userEmail = req.query.email || req.decoded_email;
+
         if (!userEmail)
-          return res.status(400).send({ message: "User email is required." });
+          return res
+            .status(401)
+            .send({ message: "Unauthorized: User email required." });
 
         const memberships = await membershipsCollection
           .find({ userEmail, status: "active" })
           .toArray();
+
         if (memberships.length === 0) return res.send([]);
 
+        const uniqueMemberships = [];
+        const seen = new Set();
+        memberships.forEach((m) => {
+          const cid = String(m.clubId);
+          if (!seen.has(cid)) {
+            uniqueMemberships.push(m);
+            seen.add(cid);
+          }
+        });
+
         const joinedClubs = await Promise.all(
-          memberships.map(async (m) => {
-            const club = await clubsCollection.findOne({ _id: m.clubId });
+          uniqueMemberships.map(async (m) => {
+           
+            let clubIdentifier;
+
+           
+            if (m.clubId instanceof ObjectId) {
+              clubIdentifier = m.clubId;
+            }
+          
+            else {
+              try {
+                clubIdentifier = new ObjectId(m.clubId);
+              } catch (e) {
+               
+                clubIdentifier = String(m.clubId);
+              }
+            }
+
+           
+            const club = await clubsCollection.findOne({
+              _id: clubIdentifier, 
+            });
+
+
+            let queryClubId;
+            if (club?._id) {
+             
+              queryClubId = club._id;
+            } else {
+           
+              queryClubId = String(m.clubId);
+            }
+
+           
             const upcomingCount = await eventsCollection.countDocuments({
-              clubId: m.clubId,
+              clubId: queryClubId, 
               eventDate: { $gte: new Date() },
             });
 
+            if (!club) return null;
+
+            // Final response object
             return {
-              membershipId: m._id,
-              status: m.status,
+              membershipId: m._id.toString(),
+              status: m.status || "active",
               joinedAt: m.joinedAt,
-              clubId: club?._id,
-              clubName: club?.clubName || "Unknown Club",
-              location: club?.location || "N/A",
+              clubId: club._id.toString(),
+              clubName: club.clubName || "Unknown Club",
+              location: club.location || "N/A",
               upcomingEventsCount: upcomingCount,
             };
           })
         );
 
-        res.send(joinedClubs);
+        const filteredJoinedClubs = joinedClubs.filter((c) => c !== null);
+
+        res.send(filteredJoinedClubs);
       } catch (err) {
-        console.error("Fetch clubs error:", err);
+        console.error("Fetch joined clubs error:", err);
         res.status(500).send({ message: "Failed to fetch joined clubs" });
       }
     });
+  
 
-    // GET /member/events
+    
     // Returns all events that a member is registered for
     app.get("/member/register/events", verifyFBToken, async (req, res) => {
       try {

@@ -315,7 +315,7 @@ async function run() {
     app.post("/events/register/:id", verifyFBToken, async (req, res) => {
       try {
         const eventId = req.params.id;
-        const userEmail = req.decoded_email; 
+        const userEmail = req.decoded_email;
 
         if (!userEmail) {
           return res
@@ -1132,6 +1132,59 @@ async function run() {
       }
     );
 
+    //ttttttttttttttttttttttttttttttttttttttttttttttt13ttttttttttttttttttttttttttttt
+    // get event
+    app.get(
+      "/manager/events",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        const email = req.decoded_email;
+
+        const events = await eventsCollection
+          .find({ managerEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send(events);
+      }
+    );
+
+    const { ObjectId } = require("mongodb");
+    // enet api
+    app.get(
+      "/manager/events/:eventId/registrations",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        const { eventId } = req.params;
+
+        const registrations = await eventRegistrationsCollection
+          .find({ eventId: new ObjectId(eventId) })
+          .sort({ registeredAt: -1 })
+          .toArray();
+
+        res.send(registrations);
+      }
+    );
+    // delete event 
+    app.delete(
+      "/manager/registrations/:id",
+      verifyFBToken,
+      verifyManager,
+      async (req, res) => {
+        const { id } = req.params;
+
+        const result = await eventRegistrationsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send(result);
+      }
+    );
+
+    //tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
+
     //nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 
     // Get My Clubs
@@ -1357,9 +1410,6 @@ async function run() {
 
         const clubIds = memberships.map((m) => m.clubId);
 
-        console.log("Active Member Email:", userEmail);
-        console.log("Active Club IDs:", clubIds);
-
         if (clubIds.length === 0) {
           return res.send([]);
         }
@@ -1369,26 +1419,47 @@ async function run() {
             clubId: { $in: clubIds },
             eventDate: { $gte: new Date() },
           })
+          .sort({ eventDate: 1 })
           .toArray();
 
-        console.log("Fetched Future Events Count:", events.length);
+        if (events.length === 0) {
+          return res.send([]);
+        }
 
-        const finalEvents = await Promise.all(
-          events.map(async (event) => {
-            const club = await clubsCollection.findOne({ _id: event.clubId });
+        const clubs = await clubsCollection
+          .find({ _id: { $in: clubIds } }, { projection: { clubName: 1 } })
+          .toArray();
 
-            const registration = await eventRegistrationsCollection.findOne({
-              eventId: event._id,
+        const clubMap = clubs.reduce((acc, club) => {
+          acc[club._id.toString()] = club.clubName;
+          return acc;
+        }, {});
+
+        const eventIds = events.map((e) => e._id);
+        const userRegistrations = await eventRegistrationsCollection
+          .find(
+            {
+              eventId: { $in: eventIds },
               userEmail: userEmail,
-            });
+            },
+            { projection: { eventId: 1 } }
+          )
+          .toArray();
 
-            return {
-              ...event,
-              clubName: club?.clubName || "Unknown Club",
-              isRegistered: !!registration,
-            };
-          })
+        const registeredEventIds = new Set(
+          userRegistrations.map((reg) => reg.eventId.toString())
         );
+
+        const finalEvents = events.map((event) => {
+          const clubName = clubMap[event.clubId.toString()] || "Unknown Club";
+          const isRegistered = registeredEventIds.has(event._id.toString());
+
+          return {
+            ...event,
+            clubName,
+            isRegistered,
+          };
+        });
 
         res.send(finalEvents);
       } catch (err) {
@@ -1439,7 +1510,7 @@ async function run() {
             type: "event",
             status: "success",
             createdAt: new Date(),
-          }); 
+          });
 
           const registration = await eventRegistrationsCollection.insertOne({
             userEmail,
@@ -1538,41 +1609,31 @@ async function run() {
 
         const joinedClubs = await Promise.all(
           uniqueMemberships.map(async (m) => {
-           
             let clubIdentifier;
 
-           
             if (m.clubId instanceof ObjectId) {
               clubIdentifier = m.clubId;
-            }
-          
-            else {
+            } else {
               try {
                 clubIdentifier = new ObjectId(m.clubId);
               } catch (e) {
-               
                 clubIdentifier = String(m.clubId);
               }
             }
 
-           
             const club = await clubsCollection.findOne({
-              _id: clubIdentifier, 
+              _id: clubIdentifier,
             });
-
 
             let queryClubId;
             if (club?._id) {
-             
               queryClubId = club._id;
             } else {
-           
               queryClubId = String(m.clubId);
             }
 
-           
             const upcomingCount = await eventsCollection.countDocuments({
-              clubId: queryClubId, 
+              clubId: queryClubId,
               eventDate: { $gte: new Date() },
             });
 
@@ -1599,9 +1660,7 @@ async function run() {
         res.status(500).send({ message: "Failed to fetch joined clubs" });
       }
     });
-  
 
-    
     // Returns all events that a member is registered for
     app.get("/member/register/events", verifyFBToken, async (req, res) => {
       try {

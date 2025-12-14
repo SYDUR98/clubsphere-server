@@ -872,7 +872,7 @@ async function run() {
 
         // Fetch all clubs created by this manager
         const clubs = await clubsCollection
-          .find({ managerEmail })
+          .find({ managerEmail, status: "approved" })
           .sort({ createdAt: -1 })
           .toArray();
 
@@ -1167,7 +1167,7 @@ async function run() {
         res.send(registrations);
       }
     );
-    // delete event 
+    // delete event
     app.delete(
       "/manager/registrations/:id",
       verifyFBToken,
@@ -1182,6 +1182,70 @@ async function run() {
         res.send(result);
       }
     );
+
+    //mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
+
+    // GET /member/all/events
+    app.get(
+      "/member/all/events",
+      verifyFBToken,
+      verifyMember,
+      async (req, res) => {
+        try {
+          const userEmail = req.decoded_email; // use decoded email from token
+          if (!userEmail)
+            return res.status(400).send({ message: "User email is required." });
+
+          const registrations = await eventRegistrationsCollection
+            .find({ userEmail })
+            .toArray();
+
+          if (registrations.length === 0) return res.send([]);
+
+          const eventsData = await Promise.all(
+            registrations.map(async (reg) => {
+              const event = await eventsCollection.findOne({
+                _id: new ObjectId(reg.eventId),
+              });
+
+              if (!event) {
+                console.warn(`Event not found for registration ${reg._id}`);
+                return null; // skip missing events
+              }
+
+              const club = await clubsCollection.findOne({
+                _id: new ObjectId(event.clubId),
+              });
+
+              const now = new Date();
+              const expired = new Date(event.eventDate) < now;
+
+              return {
+                registrationId: reg._id.toString(),
+                status: reg.status || "registered",
+                eventId: event._id.toString(),
+                title: event.title,
+                description: event.description,
+                eventDate: event.eventDate,
+                location: event.location,
+                isPaid: event.isPaid,
+                clubId: club?._id.toString() || null,
+                clubName: club?.clubName || "Unknown Club",
+                expired,
+              };
+            })
+          );
+
+          // Filter out nulls (registrations with missing events)
+          res.send(eventsData.filter((e) => e !== null));
+        } catch (err) {
+          console.error("Fetch member events error:", err);
+          res.status(500).send({ message: "Failed to fetch events" });
+        }
+      }
+    );
+
+    //mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
 
     //tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt
 
@@ -1726,6 +1790,28 @@ async function run() {
       }
     });
 
+    // app.get(
+    //   "/member/all/payments",
+    //   verifyFBToken,
+    //   verifyMember,
+    //   async (req, res) => {
+    //     try {
+    //       const email = req.decoded_email;
+
+    //       // Fetch all payments by this member
+    //       const payments = await paymentCollection
+    //         .find({ userEmail: email })
+    //         .sort({ createdAt: -1 })
+    //         .toArray();
+
+    //       res.send({ payments });
+    //     } catch (err) {
+    //       console.error("Fetch member payments error:", err);
+    //       res.status(500).send({ message: "Failed to fetch payments" });
+    //     }
+    //   }
+    // );
+
     app.get(
       "/member/all/payments",
       verifyFBToken,
@@ -1734,13 +1820,41 @@ async function run() {
         try {
           const email = req.decoded_email;
 
-          // Fetch all payments by this member
           const payments = await paymentCollection
             .find({ userEmail: email })
             .sort({ createdAt: -1 })
             .toArray();
 
-          res.send({ payments });
+          const ObjectId = require("mongodb").ObjectId;
+
+          const enrichedPayments = await Promise.all(
+            payments.map(async (p) => {
+              let clubName = "-",
+                eventTitle = "-";
+
+              if (p.clubId) {
+                const club = await clubsCollection.findOne({
+                  _id: new ObjectId(p.clubId),
+                });
+                clubName = club ? club.clubName : "-";
+              }
+
+              if (p.eventId) {
+                const event = await eventsCollection.findOne({
+                  _id: new ObjectId(p.eventId),
+                });
+                eventTitle = event ? event.title : "-";
+              }
+
+              return {
+                ...p,
+                clubName,
+                eventTitle,
+              };
+            })
+          );
+
+          res.send({ payments: enrichedPayments });
         } catch (err) {
           console.error("Fetch member payments error:", err);
           res.status(500).send({ message: "Failed to fetch payments" });

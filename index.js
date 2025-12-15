@@ -182,6 +182,28 @@ async function run() {
       res.send(result);
     });
 
+    // =============================================================================
+    //                only home showing 6 latest data
+    //==============================================================================
+    app.get("/home/clubs/display", async (req, res) => {
+      try {
+        // Fetch only latest 6 approved clubs
+        const clubs = await clubsCollection
+          .find({ status: "approved" })
+          .sort({ createdAt: -1 }) // newest first
+          .limit(6)
+          .toArray();
+
+        res.send(clubs);
+      } catch (err) {
+        console.error("Fetch clubs error:", err);
+        res.status(500).send({ message: "Failed to fetch clubs" });
+      }
+    });
+
+    
+  
+
     //================================================================================
     //              Display apis
     //================================================================================

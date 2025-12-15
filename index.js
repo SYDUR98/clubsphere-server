@@ -113,6 +113,62 @@ async function run() {
     };
 
     //=============================================================================
+    //                  user profile edit
+    //=============================================================================
+    // PATCH /users/profile/:email
+    // app.patch("/users/profile/:email", async (req, res) => {
+    //   const email = req.params.email;
+    //   const { displayName, photoURL } = req.body;
+
+    //   const filter = { email };
+    //   const updateDoc = {
+    //     $set: {
+    //       displayName,
+    //       photoURL,
+    //       updatedAt: new Date(),
+    //     },
+    //   };
+
+    //   const result = await userCollection.updateOne(filter, updateDoc);
+    //   res.send(result);
+    // });
+
+    app.patch("/users/profile/:email", verifyFBToken, async (req, res) => {
+      const email = req.params.email;
+      const { displayName, photoURL } = req.body;
+
+      const userEmail = req.decoded_email;
+
+      if (!userEmail) {
+        return res.status(400).send({ message: "User email required" });
+      }
+      try {
+        // Update MongoDB
+        const filter = { email };
+        const updateDoc = {
+          $set: {
+            displayName,
+            photoURL,
+            updatedAt: new Date(),
+          },
+        };
+        const result = await userCollection.updateOne(filter, updateDoc);
+
+        // Update Firebase
+        const user = await admin.auth().getUserByEmail(email);
+        await admin.auth().updateUser(user.uid, {
+          displayName,
+          photoURL,
+        });
+
+        res.send({ success: true, message: "Profile updated", result });
+      } catch (error) {
+        console.log(error);
+        res.status(500).send({ success: false, message: "Server error" });
+      }
+    });
+
+    //=============================================================================
     //                  user related APIs
     //=============================================================================
     // add users
@@ -130,6 +186,7 @@ async function run() {
     //              Display apis
     //================================================================================
 
+    // Get all clubs with search & filter
     app.get("/clubs/display", async (req, res) => {
       try {
         const {
@@ -139,13 +196,22 @@ async function run() {
           sortBy = "newest",
         } = req.query;
 
-        // Build query object
+        // Build MongoDB query
         const query = { status: "approved" };
-        if (search) query.clubName = { $regex: search, $options: "i" };
-        if (category) query.category = { $regex: category, $options: "i" };
-        if (location) query.location = { $regex: location, $options: "i" };
 
-        // Sorting
+        if (search.trim() !== "") {
+          query.clubName = { $regex: search.trim(), $options: "i" };
+        }
+
+        if (category.trim() !== "") {
+          query.category = { $regex: category.trim(), $options: "i" };
+        }
+
+        if (location.trim() !== "") {
+          query.location = { $regex: location.trim(), $options: "i" };
+        }
+
+        // Sorting logic
         let sort = {};
         if (sortBy === "newest") sort = { createdAt: -1 };
         else if (sortBy === "oldest") sort = { createdAt: 1 };
@@ -153,7 +219,6 @@ async function run() {
         else if (sortBy === "lowestFee") sort = { membershipFee: 1 };
 
         const clubs = await clubsCollection.find(query).sort(sort).toArray();
-
         res.send(clubs);
       } catch (err) {
         console.error("Fetch clubs error:", err);
@@ -1360,7 +1425,7 @@ async function run() {
           if (!managerEmail)
             return res.status(401).send({ message: "Unauthorized" });
 
-          // 1) clubs managed by this manager
+          //  clubs managed by this manager
           const clubs = await clubsCollection
             .find({ managerEmail })
             .project({ _id: 1, clubName: 1 })
@@ -1369,7 +1434,7 @@ async function run() {
 
           const clubIds = clubs.map((c) => c._id);
 
-          // 2) memberships for those clubs
+          //  memberships for those clubs
           const memberships = await membershipsCollection
             .find({ clubId: { $in: clubIds } })
             .toArray();
@@ -1456,74 +1521,99 @@ async function run() {
     //              Member apis
     //================================================================================
 
-    // event apis
+    // GET /member/events?search=&category=&location=&paid=&reg=&sort=
     app.get("/member/events", verifyFBToken, async (req, res) => {
       try {
-        const userEmail = req.query.email;
+        const userEmail = req.query.email || req.decoded_email;
+        if (!userEmail)
+          return res.status(400).send({ message: "User email required" });
 
-        if (!userEmail) {
-          return res.status(400).send({ message: "User email is required." });
-        }
+        const {
+          search = "",
+          category = "",
+          location = "",
+          paid = "all",
+          reg = "all",
+          sort = "newest",
+        } = req.query;
 
+        // Fetch active memberships
         const memberships = await membershipsCollection
-          .find({
-            userEmail,
-            status: "active",
-          })
+          .find({ userEmail, status: "active" })
           .toArray();
-
         const clubIds = memberships.map((m) => m.clubId);
+        if (clubIds.length === 0) return res.send([]);
 
-        if (clubIds.length === 0) {
-          return res.send([]);
-        }
+        // Build event query
+        const query = {
+          clubId: { $in: clubIds },
+          eventDate: { $gte: new Date() },
+        };
 
-        const events = await eventsCollection
-          .find({
-            clubId: { $in: clubIds },
-            eventDate: { $gte: new Date() },
-          })
-          .sort({ eventDate: 1 })
-          .toArray();
+        // Paid filter
+        if (paid === "free") query.isPaid = false;
+        if (paid === "paid") query.isPaid = true;
 
-        if (events.length === 0) {
-          return res.send([]);
-        }
+        // Search filter (title + clubName)
+        if (search.trim())
+          query.title = { $regex: search.trim(), $options: "i" };
+        if (category.trim())
+          query.category = { $regex: category.trim(), $options: "i" };
+        if (location.trim())
+          query.location = { $regex: location.trim(), $options: "i" };
 
+        // Fetch events
+        const events = await eventsCollection.find(query).toArray();
+        if (events.length === 0) return res.send([]);
+
+        // Fetch clubs info
         const clubs = await clubsCollection
-          .find({ _id: { $in: clubIds } }, { projection: { clubName: 1 } })
+          .find({ _id: { $in: clubIds } })
           .toArray();
-
         const clubMap = clubs.reduce((acc, club) => {
           acc[club._id.toString()] = club.clubName;
           return acc;
         }, {});
 
+        // Fetch user registrations
         const eventIds = events.map((e) => e._id);
         const userRegistrations = await eventRegistrationsCollection
-          .find(
-            {
-              eventId: { $in: eventIds },
-              userEmail: userEmail,
-            },
-            { projection: { eventId: 1 } }
-          )
+          .find({
+            eventId: { $in: eventIds },
+            userEmail,
+          })
           .toArray();
 
         const registeredEventIds = new Set(
-          userRegistrations.map((reg) => reg.eventId.toString())
+          userRegistrations.map((r) => r.eventId.toString())
         );
 
-        const finalEvents = events.map((event) => {
-          const clubName = clubMap[event.clubId.toString()] || "Unknown Club";
-          const isRegistered = registeredEventIds.has(event._id.toString());
+        // Build final list
+        let finalEvents = events.map((e) => ({
+          ...e,
+          clubName: clubMap[e.clubId.toString()] || "Unknown Club",
+          isRegistered: registeredEventIds.has(e._id.toString()),
+        }));
 
-          return {
-            ...event,
-            clubName,
-            isRegistered,
-          };
-        });
+        // Registration filter
+        if (reg === "registered")
+          finalEvents = finalEvents.filter((e) => e.isRegistered);
+        if (reg === "notRegistered")
+          finalEvents = finalEvents.filter((e) => !e.isRegistered);
+
+        // Sort
+        if (sort === "newest")
+          finalEvents.sort(
+            (a, b) => new Date(b.eventDate) - new Date(a.eventDate)
+          );
+        if (sort === "oldest")
+          finalEvents.sort(
+            (a, b) => new Date(a.eventDate) - new Date(b.eventDate)
+          );
+        if (sort === "lowest")
+          finalEvents.sort((a, b) => (a.eventFee || 0) - (b.eventFee || 0));
+        if (sort === "highest")
+          finalEvents.sort((a, b) => (b.eventFee || 0) - (a.eventFee || 0));
 
         res.send(finalEvents);
       } catch (err) {
@@ -1645,11 +1735,10 @@ async function run() {
         res.status(500).send({ message: "Failed to load member stats" });
       }
     });
-
+    // change for backend seacrch
     app.get("/member/clubs", verifyFBToken, async (req, res) => {
       try {
         const userEmail = req.query.email || req.decoded_email;
-
         if (!userEmail)
           return res
             .status(401)
@@ -1659,113 +1748,126 @@ async function run() {
           .find({ userEmail, status: "active" })
           .toArray();
 
-        if (memberships.length === 0) return res.send([]);
-
-        const uniqueMemberships = [];
-        const seen = new Set();
-        memberships.forEach((m) => {
-          const cid = String(m.clubId);
-          if (!seen.has(cid)) {
-            uniqueMemberships.push(m);
-            seen.add(cid);
-          }
-        });
-
         const joinedClubs = await Promise.all(
-          uniqueMemberships.map(async (m) => {
-            let clubIdentifier;
-
-            if (m.clubId instanceof ObjectId) {
-              clubIdentifier = m.clubId;
-            } else {
-              try {
-                clubIdentifier = new ObjectId(m.clubId);
-              } catch (e) {
-                clubIdentifier = String(m.clubId);
-              }
-            }
-
+          memberships.map(async (m) => {
             const club = await clubsCollection.findOne({
-              _id: clubIdentifier,
+              _id: new ObjectId(m.clubId),
             });
-
-            let queryClubId;
-            if (club?._id) {
-              queryClubId = club._id;
-            } else {
-              queryClubId = String(m.clubId);
-            }
+            if (!club) return null;
 
             const upcomingCount = await eventsCollection.countDocuments({
-              clubId: queryClubId,
+              clubId: club._id,
               eventDate: { $gte: new Date() },
             });
 
-            if (!club) return null;
-
-            // Final response object
             return {
               membershipId: m._id.toString(),
-              status: m.status || "active",
-              joinedAt: m.joinedAt,
               clubId: club._id.toString(),
-              clubName: club.clubName || "Unknown Club",
-              location: club.location || "N/A",
+              clubName: club.clubName,
+              location: club.location,
               upcomingEventsCount: upcomingCount,
             };
           })
         );
 
-        const filteredJoinedClubs = joinedClubs.filter((c) => c !== null);
-
-        res.send(filteredJoinedClubs);
+        res.send(joinedClubs.filter(Boolean));
       } catch (err) {
         console.error("Fetch joined clubs error:", err);
         res.status(500).send({ message: "Failed to fetch joined clubs" });
       }
     });
 
+    //============================
     // Returns all events that a member is registered for
+
     app.get("/member/register/events", verifyFBToken, async (req, res) => {
       try {
-        const userEmail = req.query.email || req.decoded_email;
-        if (!userEmail) {
-          return res.status(400).send({ message: "User email is required." });
-        }
+        const {
+          email,
+          search = "",
+          clubName = "",
+          location = "",
+          dateFrom,
+          dateTo,
+          paidStatus,
+          sortBy,
+        } = req.query;
 
+        const userEmail = email || req.decoded_email;
+
+        /* Get registrations */
         const registrations = await eventRegistrationsCollection
-          .find({
-            userEmail,
-            status: { $ne: "cancelled" },
-          })
+          .find({ userEmail, status: { $ne: "cancelled" } })
           .toArray();
 
-        if (registrations.length === 0) return res.send([]);
+        if (!registrations.length) return res.send([]);
 
         const eventIds = registrations.map((r) => r.eventId);
 
-        const events = await eventsCollection
-          .find({ _id: { $in: eventIds } })
+        /*  Build event query */
+        const query = {
+          _id: { $in: eventIds },
+        };
+
+        if (search) {
+          query.title = { $regex: search, $options: "i" };
+        }
+
+        if (location) {
+          query.location = { $regex: location, $options: "i" };
+        }
+
+        if (paidStatus === "paid") query.isPaid = true;
+        if (paidStatus === "free") query.isPaid = false;
+
+        if (dateFrom || dateTo) {
+          query.eventDate = {};
+          if (dateFrom) query.eventDate.$gte = new Date(dateFrom);
+          if (dateTo) query.eventDate.$lte = new Date(dateTo);
+        }
+
+        /*  Sorting */
+        let sortQuery = {};
+        if (sortBy === "newest") sortQuery = { eventDate: -1 };
+        if (sortBy === "oldest") sortQuery = { eventDate: 1 };
+        if (sortBy === "highestFee") sortQuery = { eventFee: -1 };
+        if (sortBy === "lowestFee") sortQuery = { eventFee: 1 };
+
+        /*  Fetch events */
+        let events = await eventsCollection
+          .find(query)
+          .sort(sortQuery)
           .toArray();
 
-        const finalEvents = await Promise.all(
-          events.map(async (event) => {
-            const club = await clubsCollection.findOne({ _id: event.clubId });
-            const isRegistered = registrations.some(
-              (r) => r.eventId.toString() === event._id.toString()
-            );
+        /*  Fetch all related clubs once */
+        const clubIds = [...new Set(events.map((e) => e.clubId))];
 
-            return {
-              ...event,
-              clubName: club?.clubName || "Unknown Club",
-              isRegistered,
-            };
-          })
-        );
+        const clubs = await clubsCollection
+          .find({ _id: { $in: clubIds } })
+          .project({ clubName: 1 })
+          .toArray();
+
+        const clubMap = {};
+        clubs.forEach((c) => {
+          clubMap[c._id.toString()] = c.clubName;
+        });
+
+        /*  Attach clubName + filter by clubName */
+        const finalEvents = events
+          .map((ev) => ({
+            ...ev,
+            clubName: clubMap[ev.clubId.toString()] || "Unknown Club",
+            isRegistered: true,
+          }))
+          .filter((ev) =>
+            clubName
+              ? ev.clubName.toLowerCase().includes(clubName.toLowerCase())
+              : true
+          );
 
         res.send(finalEvents);
       } catch (err) {
-        console.error("Member events error:", err);
+        console.error("Member register events error:", err);
         res.status(500).send({ message: "Failed to load events" });
       }
     });

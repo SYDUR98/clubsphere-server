@@ -12,9 +12,21 @@ Our design philosophy centers on creating distinct, secure **"Digital Spaces"** 
 
 This structural uniqueness ensures clarity, security, and a focused workflow for every user interacting with the platform.
 
-##  Live Site URL
+##  Live Site URL (Front End)
 
- [ Client Link Here]
+ [ https://club-sphere-app.web.app/]
+
+ ##  GitHub Repository (Client)
+
+ [ https://github.com/SYDUR98/clubsphere-client]
+
+##  Live Site URL (Back End)
+
+ [ https://clubsphere-server-ruby.vercel.app/]
+
+## GitHub Repository (Server)
+
+ [ https://github.com/SYDUR98/clubsphere-server]
 
 
 ## Frontend Key Features & Technology Highlights

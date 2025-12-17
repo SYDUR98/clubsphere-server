@@ -148,4 +148,3 @@ Client .env.local,"VITE_API_URL, VITE_FIREBASE_API_KEY",API endpoint and Firebas
 | :--- | :--- | :--- | :--- |
 | **[MD SYDUR RAHAMAN]** | Full-Stack Developer | [eng.sydur@gmail.com] | [https://github.com/SYDUR98] |
 
----

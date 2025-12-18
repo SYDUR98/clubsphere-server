@@ -1,64 +1,74 @@
 const express = require("express");
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const cors = require("cors");
 const app = express();
+const cors = require("cors");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const admin = require("firebase-admin");
+const Stripe = require("stripe");
 require("dotenv").config();
 
-const port = process.env.PORT || 3000;
 
-const admin = require("firebase-admin");
+app.use(cors());
+app.use(express.json());
 
-// var serviceAccount = require("./club-sphere-app-firebase-adminsdk.json");
-
-const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8')
+// Firebase Setup
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, 'base64').toString('utf8');
 const serviceAccount = JSON.parse(decoded);
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+    });
+}
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
-const Stripe = require("stripe");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// Verify Firebase Token
-const verifyFBToken = async (req, res, next) => {
-  const token = req.headers.authorization;
-  if (!token) return res.status(401).send({ message: "unauthorized access" });
-
-  try {
-    const idToken = token.split(" ")[1];
-    const decoded = await admin.auth().verifyIdToken(idToken);
-    req.decoded_email = decoded.email;
-    next();
-  } catch (err) {
-    return res.status(401).send({ message: "unauthorized access" });
-  }
-};
-// mongodb
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.chduhq7.mongodb.net/?appName=Cluster0`;
-
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
-
-// Middleware
-app.use(express.json());
-app.use(cors());
-
 app.get("/", (req, res) => {
-  res.send("club sphere sarver working!");
+    res.send("club sphere server working!");
 });
 
-async function run() {
-  try {
-    // Connect the client to the server	(optional starting in v4.7)
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.chduhq7.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+
+let cachedClient = null;
+let cachedDb = null;
+
+
+async function connectDB() {
+    // if (cachedDb) return { client: cachedClient, db: cachedDb };
+
+    const client = new MongoClient(uri, {
+        serverApi: {
+            version: ServerApiVersion.v1,
+            strict: true,
+            deprecationErrors: true,
+        },
+    });
+
     await client.connect();
     const db = client.db("club-sphere-db");
+
+    cachedClient = client;
+    cachedDb = db;
+
+    console.log("MongoDB Connected (Cached)");
+    return { client, db };
+}
+
+// Token Verification Middleware
+const verifyFBToken = async (req, res, next) => {
+    const token = req.headers.authorization;
+    if (!token) return res.status(401).send({ message: "unauthorized access" });
+    try {
+        const idToken = token.split(" ")[1];
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        req.decoded_email = decoded.email;
+        next();
+    } catch (err) {
+        return res.status(401).send({ message: "unauthorized access" });
+    }
+};
+
+async function run() {
+    const { db } = await connectDB();
+
     const userCollection = db.collection("users");
     const clubsCollection = db.collection("clubs");
     const eventsCollection = db.collection("events");
@@ -115,23 +125,7 @@ async function run() {
     //=============================================================================
     //                  user profile edit
     //=============================================================================
-    // PATCH /users/profile/:email
-    // app.patch("/users/profile/:email", async (req, res) => {
-    //   const email = req.params.email;
-    //   const { displayName, photoURL } = req.body;
-
-    //   const filter = { email };
-    //   const updateDoc = {
-    //     $set: {
-    //       displayName,
-    //       photoURL,
-    //       updatedAt: new Date(),
-    //     },
-    //   };
-
-    //   const result = await userCollection.updateOne(filter, updateDoc);
-    //   res.send(result);
-    // });
+    
 
     app.patch("/users/profile/:email", verifyFBToken, async (req, res) => {
       const email = req.params.email;
@@ -397,104 +391,7 @@ async function run() {
       }
     );
 
-    // Register for an Event (PROTECTED)
-    // app.post("/events/register/:id", verifyFBToken, async (req, res) => {
-    //   try {
-    //     const eventId = req.params.id;
-    //     const userEmail = req.decoded_email;
-
-    //     if (!userEmail) {
-    //       return res
-    //         .status(401)
-    //         .send({ message: "Unauthorized: User email missing from token." });
-    //     }
-
-    //     const event = await eventsCollection.findOne({
-    //       _id: new ObjectId(eventId),
-    //     });
-    //     if (!event) {
-    //       return res.status(404).send({ message: "Event not found." });
-    //     }
-
-    //     // 1. Check membership for event club
-    //     const member = await membershipsCollection.findOne({
-    //       userEmail,
-    //       clubId: event.clubId,
-    //       status: "active",
-    //     });
-
-    //     if (!member) {
-    //       return res.status(403).send({
-    //         message:
-    //           "Forbidden: You must be an active member of the club to register for this event.",
-    //       });
-    //     }
-
-    //     // 2. Check for duplicate registration
-    //     const existingRegistration = await eventRegistrationsCollection.findOne(
-    //       {
-    //         eventId: new ObjectId(eventId),
-    //         userEmail: userEmail,
-    //         status: { $ne: "cancelled" },
-    //       }
-    //     );
-
-    //     if (existingRegistration) {
-    //       return res
-    //         .status(400)
-    //         .send({ message: "You are already registered for this event." });
-    //     }
-
-    //     // 3. Free Event Logic
-    //     if (!event.isPaid || event.eventFee === 0) {
-    //       await eventRegistrationsCollection.insertOne({
-    //         eventId: new ObjectId(eventId),
-    //         clubId: event.clubId,
-    //         userEmail: userEmail,
-    //         status: "registered",
-    //         registeredAt: new Date(),
-    //       });
-    //       return res.send({
-    //         message: "Successfully registered for the free event.",
-    //       });
-    //     }
-
-    //     // 4. Paid Event Logic (Stripe Session Creation)
-    //     const feeInCents = Math.round(event.eventFee * 100);
-
-    //     const session = await stripe.checkout.sessions.create({
-    //       payment_method_types: ["card"],
-    //       line_items: [
-    //         {
-    //           price_data: {
-    //             currency: "usd",
-    //             product_data: {
-    //               name: `Event Registration: ${event.title}`,
-    //             },
-    //             unit_amount: feeInCents,
-    //           },
-    //           quantity: 1,
-    //         },
-    //       ],
-    //       mode: "payment",
-    //       success_url: `${process.env.SITE_DOMAIN}/event/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-    //       cancel_url: `${process.env.SITE_DOMAIN}/events/${eventId}?status=cancel`,
-    //       metadata: {
-    //         userEmail,
-    //         eventId: event._id.toString(),
-    //         clubId: event.clubId.toString(),
-    //         type: "event_registration",
-    //       },
-    //     });
-
-    //     res.send({ url: session.url });
-    //   } catch (err) {
-    //     console.error("Event registration error:", err);
-    //     res
-    //       .status(500)
-    //       .send({ message: "Internal server error during registration." });
-    //   }
-    // });
+    
 
     app.post("/events/register/:id", verifyFBToken, async (req, res) => {
       try {
@@ -1482,18 +1379,7 @@ async function run() {
       }
     });
 
-    // delete events
-    // app.delete("/events/:id", async (req, res) => {
-    //   try {
-    //     const id = req.params.id;
-    //     const query = { _id: new ObjectId(id) };
-    //     const result = await eventsCollection.deleteOne(query);
-    //     res.send(result);
-    //   } catch (err) {
-    //     res.status(500).send({ message: "Delete failed" });
-    //   }
-    // });
-
+    
     // Update Event
     app.patch("/events/:id", async (req, res) => {
       try {
@@ -2011,27 +1897,7 @@ async function run() {
       }
     });
 
-    // app.get(
-    //   "/member/all/payments",
-    //   verifyFBToken,
-    //   verifyMember,
-    //   async (req, res) => {
-    //     try {
-    //       const email = req.decoded_email;
-
-    //       // Fetch all payments by this member
-    //       const payments = await paymentCollection
-    //         .find({ userEmail: email })
-    //         .sort({ createdAt: -1 })
-    //         .toArray();
-
-    //       res.send({ payments });
-    //     } catch (err) {
-    //       console.error("Fetch member payments error:", err);
-    //       res.status(500).send({ message: "Failed to fetch payments" });
-    //     }
-    //   }
-    // );
+    
 
     app.get(
       "/member/all/payments",
@@ -2045,8 +1911,6 @@ async function run() {
             .find({ userEmail: email })
             .sort({ createdAt: -1 })
             .toArray();
-
-          const ObjectId = require("mongodb").ObjectId;
 
           const enrichedPayments = await Promise.all(
             payments.map(async (p) => {
@@ -2082,29 +1946,14 @@ async function run() {
         }
       }
     );
+  
 
-    //******************************************************************************** */
-    // Send a ping to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-    // console.log(
-    //   "Pinged your deployment. You successfully connected to MongoDB!"
-    // );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
-  }
+    
+
+    console.log("Club Sphere API Routes Ready");
 }
-run().catch(console.dir);
 
-// app.listen(port, () => {
-//   console.log(`Example app listening on port ${port}`);
-// });
-
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(port, () => {
-        console.log(`Server is running on port: ${port}`);
-    });
-}
+run()
 
 
 module.exports = app;
